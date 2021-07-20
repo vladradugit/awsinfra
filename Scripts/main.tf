@@ -458,3 +458,93 @@ EOD
   }
 
 }
+
+#---launch configuration  
+resource "aws_launch_configuration" "wp_lc" {
+  name_prefix          = "wp_lc-"
+  image_id             = "${aws_ami_from_instance.wp_golden.id}"
+  instance_type        = "${var.lc_instance_type}"
+  security_groups      = ["${aws_security_group.wp_private_sg.id}"]
+  iam_instance_profile = "${aws_iam_instance_profile.s3_access_profile.id}"
+  key_name             = "${aws_key_pair.wp_auth.id}"
+  user_data            = "${file("userdata")}"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#----- Auto Scailing Group-----
+resource "aws_autoscaling_group" "wp_asg" {
+  name                      = "asg-${aws_launch_configuration.wp_lc.id}"
+  max_size                  = "${var.asg_max}"
+  min_size                  = "${var.asg_min}"
+  health_check_grace_period = "${var.asg_grace}"
+  health_check_type         = "${var.asg_hct}"
+  desired_capacity          = "${var.asg_cap}"
+  force_delete              = true
+  load_balacers             = ["${aws_elb.wp_elb.id}"]
+
+  vpc_zone_indetifier = ["${aws_subnet.wp_private1_subnet.id}"
+                         "${aws_subnet.wp_private2.subnet.id}" 
+  ]  
+
+  launch_configuration = "${aws_launch_configuration.wp_lc.name}"
+
+  tag {
+    key   = "Name"
+    value = "wp_asg-instance"
+    propagate_at_launch = true 
+  }
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#-------------ROUTE 53----------
+
+#Primary zone
+
+resource "aws_route53_zone" "primary" {
+  name              = "${var.domain_name}.com"
+  delegation_sed_id = "${var_delegation_set}"
+}
+
+ #WWW record inside route 53
+
+ resource "aws_route53_record" "www" {
+   zone_id = "${aws_route53_zone.primary.zone_id}"
+   name = "www.${var.domain_name}.com"
+   type = "A"
+
+   alias {
+    name                  = "${aws_elb.wp_elb.dns_name}"
+    zone_id               = "${aws_elb.wp_elb.zone_id}"
+    evaluate_targe_health = false 
+  }
+ }
+
+ #DEV - Public Zone
+ resource "aws_route52_record" "dev" {
+   zone_id = "${aws_route53_zone.primary.zone_id}"
+   name = "dev.${var.domain_name}.com"
+   type = "A"
+   ttl = "300"
+   records = ["${aws_instance.wp_dev.public_ip}"]
+ }
+
+#Private zone
+resource "aws_route53_zone" "secondary" {
+  name = "${var.domain_name}.com"
+  vpc_id = "${aws_vpc.wp_vpc.id}"
+}
+
+#DB 
+resource "aws_route53_record" "db" {
+  zone_id = "${aws-route53_zone.secondary.zone_id}"
+  name = "db.${var.domain_name}.com"
+  type = "CNAME"
+  ttl = "300"
+  records = ["${aws_db_instance.wp_db_instance}"]
+}
